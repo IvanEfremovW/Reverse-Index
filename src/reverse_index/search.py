@@ -21,7 +21,7 @@ class QueryParser:
     TOKEN_PATTERN = re.compile(r'(\(|\)|AND|OR|/|\+|-|"[^"]+"|\S+)')
 
     @classmethod
-    def parse(cls, query: str) -> List[Tuple[str, str]]:
+    def parse(cls, query: str) -> List[Tuple]:
         """
         Парсинг запроса в список (оператор, термин).
 
