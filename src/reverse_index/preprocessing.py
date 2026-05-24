@@ -2,9 +2,13 @@ import re
 import csv
 from typing import Iterator, Dict, List, Any
 from pathlib import Path
+import pymorphy3
 
 import nltk
 from nltk.corpus import stopwords
+
+MORPHY = pymorphy3.MorphAnalyzer()
+USE_MORPHY = True
 
 # Загрузка стоп-слов при первом импорте
 try:
@@ -56,6 +60,10 @@ def tokenize(text: str) -> List[str]:
     for token in tokens:
         if len(token) < 2 or token in STOPWORDS:
             continue
+
+        if USE_MORPHY:
+            token = MORPHY.parse(token)[0].normal_form
+
         result.append(token)
 
     return result
@@ -95,16 +103,43 @@ def load_telegram_csv(filepath: Path | str) -> Iterator[Dict[str, Any]]:
             }
 
 
+def filter_by_document_frequency(
+    documents: List[Dict[str, Any]], min_doc_freq: int = 3
+) -> List[Dict[str, Any]]:
+    """
+    Удаляет термины, встречающиеся менее чем в min_doc_freq документах.
+
+    Args:
+        documents: Список документов с ключом 'tokens'
+        min_doc_freq: Минимальная частота по документам
+
+    Returns:
+        Отфильтрованный список документов (in-place модификация)
+    """
+    from collections import Counter
+
+    # Подсчёт: в скольких документах встречается каждый термин
+    term_doc_freq = Counter(term for doc in documents for term in set(doc["tokens"]))
+
+    # Фильтрация токенов в каждом документе
+    for doc in documents:
+        doc["tokens"] = [t for t in doc["tokens"] if term_doc_freq[t] >= min_doc_freq]
+
+    return documents
+
+
 def preprocess_documents(
-    source: Path | str, lemmatize: bool = True, min_tokens: int = 1
+    source: Path | str,
+    min_tokens: int = 1,
+    min_doc_freq: int = 3,
 ) -> List[Dict[str, Any]]:
     """
     Полный пайплайн предобработки документов.
 
     Args:
         source: Путь к CSV файлу
-        lemmatize: Использовать ли лемматизацию
         min_tokens: Минимальное количество токенов в документе
+        min_doc_freq: Минимальная частота по документам
 
     Returns:
         Список обработанных документов
@@ -114,5 +149,15 @@ def preprocess_documents(
     for doc in load_telegram_csv(source):
         if len(doc["tokens"]) >= min_tokens:
             documents.append(doc)
+
+    # Переупорядочивание
+    documents.sort(key=lambda x: (x.get("channel", ""), x.get("date", "")))
+
+    for new_id, doc in enumerate(documents):
+        doc["doc_id"] = new_id
+
+    # Фильтрация редких терминов
+    if min_doc_freq > 1:
+        documents = filter_by_document_frequency(documents, min_doc_freq)
 
     return documents
