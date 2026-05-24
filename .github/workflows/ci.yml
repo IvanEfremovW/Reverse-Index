@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  lint:
+    name: Check linting & formatting 
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@v7
+        with:
+          uv-version: latest
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev --no-install-project
+
+      - name: Run linter
+        run: uv run ruff check . --output-format=github
+
+      - name: Run formatter
+        run: uv run ruff format . --check 
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@v7
+        with:
+          uv-version: latest
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev --no-install-project
+
+      - name: Run type checker
+        run: uv run ty check src/
+
+  test:
+    name: Test 
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@v7
+        with:
+          uv-version: latest
+          enable-cache: true
+
+      - name: Install dependencies and project
+        run: uv sync --dev
+
+      - name: Run tests 
+        run: uv run pytest tests/
