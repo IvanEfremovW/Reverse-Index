@@ -150,6 +150,12 @@ def preprocess_documents(
         if len(doc["tokens"]) >= min_tokens:
             documents.append(doc)
 
+    # Переупорядочивание
+    documents.sort(key=lambda x: (x.get("channel", ""), x.get("date", "")))
+
+    for new_id, doc in enumerate(documents):
+        doc["doc_id"] = new_id
+
     # Фильтрация редких терминов
     if min_doc_freq > 1:
         documents = filter_by_document_frequency(documents, min_doc_freq)
