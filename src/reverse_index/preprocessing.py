@@ -2,9 +2,13 @@ import re
 import csv
 from typing import Iterator, Dict, List, Any
 from pathlib import Path
+import pymorphy3
 
 import nltk
 from nltk.corpus import stopwords
+
+MORPHY = pymorphy3.MorphAnalyzer()
+USE_MORPHY = True
 
 # Загрузка стоп-слов при первом импорте
 try:
@@ -56,6 +60,10 @@ def tokenize(text: str) -> List[str]:
     for token in tokens:
         if len(token) < 2 or token in STOPWORDS:
             continue
+
+        if USE_MORPHY:
+            token = MORPHY.parse(token)[0].normal_form
+
         result.append(token)
 
     return result
