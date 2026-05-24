@@ -1,6 +1,7 @@
 import time
 import statistics
 import tracemalloc
+import json
 from pathlib import Path
 from typing import List, Dict, Any
 from contextlib import contextmanager
@@ -25,10 +26,14 @@ def timer(label: str = ""):
 def memory_tracker():
     """Контекстный менеджер для отслеживания пикового потребления RAM."""
     tracemalloc.start()
+    snapshot_start = tracemalloc.get_traced_memory()
     yield
-    current, peak = tracemalloc.get_traced_memory()
+    snapshot_end = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    return current, peak
+
+    # Вычисляем разницу (дельту) потребления памяти внутри блока
+    peak_increase = snapshot_end[1] - snapshot_start[1]
+    return max(0, peak_increase)
 
 
 class BenchmarkRunner:
@@ -52,52 +57,81 @@ class BenchmarkRunner:
     def benchmark_indexing(
         self, documents: List[Dict], compressed: bool = False, runs: int = 3
     ) -> Dict[str, Any]:
-        """
-        Бенчмарк процесса индексирования.
-
-        Returns:
-            Метрики: время, размер, потребление памяти
-        """
         times = []
-        sizes = []
 
-        for run in range(runs):
-            with timer(f"Indexing (run {run + 1}, compressed={compressed})"):
-                index = InvertedIndex(compressed=compressed)
-                index.build(documents)
+        # 1. Замер времени построения (CPU bound)
+        for _ in range(runs):
+            start = time.perf_counter()
+            temp_idx = InvertedIndex(compressed=compressed)
+            temp_idx.build(documents)
+            if compressed:
+                temp_idx = CompressedInvertedIndex(temp_idx)
+            times.append(time.perf_counter() - start)
 
-                if compressed:
-                    index = CompressedInvertedIndex(index)
+        # 2. Построение финального индекса для сохранения и замеров
+        base_index = InvertedIndex(compressed=compressed)
+        base_index.build(documents)
 
-            # Сохранение и замер на диске
-            with timer(f"Saving (compressed={compressed})"):
-                save_result = save_index(
-                    index,
-                    self.output_dir
-                    / f"{'compressed' if compressed else 'uncompressed'}",
-                    compressed=compressed,
-                )
+        # Расчет размера несжатых списков (до применения компрессора)
+        pl_uncompressed_size = sum(len(pl) * 4 for pl in base_index.posting_lists)
 
-            times.append(
-                save_result.get(
-                    f"{'compressed' if compressed else 'uncompressed'}_size", 0
-                )
-            )
-            sizes.append(
-                save_result.get(
-                    f"{'compressed' if compressed else 'uncompressed'}_size", 0
-                )
-            )
+        # Явная типизация для type checker
+        index: InvertedIndex | CompressedInvertedIndex
+        if compressed:
+            index = CompressedInvertedIndex(base_index)
+            pl_compressed_size = sum(len(v) for v in index._compressed_plists.values())
+        else:
+            index = base_index
+            pl_compressed_size = 0
+
+        # 3. Сохранение на диск (IO bound)
+        save_path = (
+            self.output_dir / f"{'compressed' if compressed else 'uncompressed'}"
+        )
+        with timer(f"Saving (compressed={compressed})"):
+            save_result = save_index(index, save_path, compressed=compressed)
+
+        file_size = save_result.get(
+            f"{'compressed' if compressed else 'uncompressed'}_size", 0
+        )
 
         return {
             "doc_count": len(documents),
             "vocabulary_size": len(index.vocabulary),
-            "avg_time_sec": round(statistics.mean(times) / 1000 if times else 0, 3),
-            "avg_size_bytes": int(statistics.mean(sizes)) if sizes else 0,
-            "avg_size_human": format_size(int(statistics.mean(sizes)))
-            if sizes
-            else "N/A",
+            "avg_build_time_sec": round(statistics.mean(times), 3),
+            "file_size_bytes": file_size,
+            "file_size_human": format_size(file_size),
+            "pl_uncompressed_bytes": pl_uncompressed_size,
+            "pl_compressed_bytes": pl_compressed_size
+            if compressed
+            else pl_uncompressed_size,
             "compressed": compressed,
+        }
+
+    def compare_plist_compression(
+        self, uncomp_metrics: Dict, comp_metrics: Dict
+    ) -> Dict[str, Any]:
+        """
+        Сравнение эффективности сжатия исключительно инвертированных списков.
+        Это позволяет убрать влияние размера pickle-файла и словаря.
+        """
+        uncomp_size = uncomp_metrics["pl_uncompressed_bytes"]
+        comp_size = comp_metrics["pl_compressed_bytes"]
+
+        if comp_size == 0 or comp_size == uncomp_size:
+            ratio = 1.0
+            savings = 0.0
+        else:
+            ratio = uncomp_size / comp_size
+            savings = (1 - comp_size / uncomp_size) * 100
+
+        return {
+            "uncompressed_pl_bytes": uncomp_size,
+            "compressed_pl_bytes": comp_size,
+            "uncompressed_pl_human": format_size(uncomp_size),
+            "compressed_pl_human": format_size(comp_size),
+            "plist_compression_ratio": round(ratio, 2),
+            "plist_space_savings_percent": round(savings, 2),
         }
 
     def benchmark_search(
@@ -105,16 +139,7 @@ class BenchmarkRunner:
     ) -> Dict[str, Any]:
         """
         Бенчмарк поискового запроса.
-
-        Args:
-            query: Поисковый запрос (например, "Ректор СПбГУ/МГУ")
-            compressed: Использовать ли сжатый индекс
-            runs: Количество прогонов для статистики
-
-        Returns:
-            Метрики поиска: латентность, количество результатов
         """
-        # Загрузка индекса
         index_dir = self.output_dir / ("compressed" if compressed else "uncompressed")
         index = load_index(index_dir, compressed=compressed)
         searcher = BooleanSearcher(index)
@@ -152,53 +177,47 @@ class BenchmarkRunner:
     def run_full_benchmark(
         self, query: str = "ректор спбгу мгу", doc_limit: int | None = None
     ):
-        """
-        Полный цикл бенчмаркинга.
-
-        1. Индексирование (сжатое / несжатое)
-        2. Сравнение размеров
-        3. Поиск по тестовому запросу
-        4. Формирование отчёта
-        """
+        """Полный цикл бенчмаркинга."""
         print("Загрузка документов...")
         documents = self.load_documents(limit=doc_limit)
         print(f"Загружено {len(documents)} документов")
 
-        # Бенчмарк индексирования
         print("\nБенчмарк индексирования (несжатый)...")
         uncomp_metrics = self.benchmark_indexing(documents, compressed=False)
 
         print("\nБенчмарк индексирования (сжатый)...")
         comp_metrics = self.benchmark_indexing(documents, compressed=True)
 
-        # Сравнение размеров
-        print("\nСравнение размеров...")
-        size_comparison = compare_index_sizes(
+        print("\n Сравнение размеров...")
+        # Сравнение полных файлов (для справки)
+        file_comparison = compare_index_sizes(
             self.output_dir / "uncompressed" / "index_uncompressed.pkl",
             self.output_dir / "compressed" / "index_compressed.pkl",
         )
+        # Сравнение эффективности алгоритма (только списки)
+        plist_comparison = self.compare_plist_compression(uncomp_metrics, comp_metrics)
 
-        # Бенчмарк поиска
         print(f"\nБенчмарк поиска: '{query}'")
         search_uncomp = self.benchmark_search(query, compressed=False)
         search_comp = self.benchmark_search(query, compressed=True)
 
-        # Формирование отчёта
         report = {
             "documents_indexed": len(documents),
             "indexing": {
                 "uncompressed": uncomp_metrics,
                 "compressed": comp_metrics,
             },
-            "storage_comparison": size_comparison,
+            "storage_comparison": file_comparison,  # Размер pickle файлов
+            "plist_compression": plist_comparison,  # Эффективность алгоритма
             "search": {
                 "query": query,
                 "uncompressed": search_uncomp,
                 "compressed": search_comp,
             },
             "summary": {
-                "compression_ratio": size_comparison["compression_ratio"],
-                "space_saved": size_comparison["space_savings_percent"],
+                "file_compression_ratio": file_comparison["compression_ratio"],
+                "plist_compression_ratio": plist_comparison["plist_compression_ratio"],
+                "plist_space_saved": plist_comparison["plist_space_savings_percent"],
                 "search_overhead_ms": round(
                     search_comp["latency_ms"]["median"]
                     - search_uncomp["latency_ms"]["median"],
@@ -207,14 +226,10 @@ class BenchmarkRunner:
             },
         }
 
-        # Сохранение отчёта
-        import json
-
         report_path = self.output_dir / "benchmark_report.json"
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2, default=str)
 
-        # Печать сводки
         self._print_summary(report)
 
         return report
@@ -226,18 +241,22 @@ class BenchmarkRunner:
         print("=" * 60)
 
         s = report["summary"]
-        print("\nСжатие:")
-        print(f"   - Коэффициент сжатия: {s['compression_ratio']}x")
-        print(f"   - Экономия места: {s['space_saved']}%")
+        print("\n️ Сжатие:")
+        print(
+            f"   - Полный файл (Pickle): {s['file_compression_ratio']}x (включает словарь)"
+        )
+        print(
+            f"   - Только Posting Lists: {s['plist_compression_ratio']}x (экономия: {s['plist_space_saved']}%)"
+        )
         print(f"   - Накладные расходы на поиск: {s['search_overhead_ms']} мс")
 
-        print("\nИндекс:")
+        print("\n Индекс:")
         print(f"   - Документов: {report['documents_indexed']:,}")
         print(
             f"   - Уникальных терминов: {report['indexing']['compressed']['vocabulary_size']:,}"
         )
 
-        print(f"\nПоиск '{report['search']['query']}':")
+        print(f"\n Поиск '{report['search']['query']}':")
         for mode in ["uncompressed", "compressed"]:
             lat = report["search"][mode]["latency_ms"]
             print(

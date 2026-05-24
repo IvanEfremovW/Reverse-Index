@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "bitarray>=3.8.1",
+    "dawg-python>=0.7.2",
     "nltk>=3.9.4",
     "pymorphy3>=2.0.6",
     "pyyaml>=6.0.3",
