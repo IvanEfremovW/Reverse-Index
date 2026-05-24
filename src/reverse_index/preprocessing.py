@@ -103,16 +103,43 @@ def load_telegram_csv(filepath: Path | str) -> Iterator[Dict[str, Any]]:
             }
 
 
+def filter_by_document_frequency(
+    documents: List[Dict[str, Any]], min_doc_freq: int = 3
+) -> List[Dict[str, Any]]:
+    """
+    Удаляет термины, встречающиеся менее чем в min_doc_freq документах.
+
+    Args:
+        documents: Список документов с ключом 'tokens'
+        min_doc_freq: Минимальная частота по документам
+
+    Returns:
+        Отфильтрованный список документов (in-place модификация)
+    """
+    from collections import Counter
+
+    # Подсчёт: в скольких документах встречается каждый термин
+    term_doc_freq = Counter(term for doc in documents for term in set(doc["tokens"]))
+
+    # Фильтрация токенов в каждом документе
+    for doc in documents:
+        doc["tokens"] = [t for t in doc["tokens"] if term_doc_freq[t] >= min_doc_freq]
+
+    return documents
+
+
 def preprocess_documents(
-    source: Path | str, lemmatize: bool = True, min_tokens: int = 1
+    source: Path | str,
+    min_tokens: int = 1,
+    min_doc_freq: int = 3,
 ) -> List[Dict[str, Any]]:
     """
     Полный пайплайн предобработки документов.
 
     Args:
         source: Путь к CSV файлу
-        lemmatize: Использовать ли лемматизацию
         min_tokens: Минимальное количество токенов в документе
+        min_doc_freq: Минимальная частота по документам
 
     Returns:
         Список обработанных документов
@@ -122,5 +149,9 @@ def preprocess_documents(
     for doc in load_telegram_csv(source):
         if len(doc["tokens"]) >= min_tokens:
             documents.append(doc)
+
+    # Фильтрация редких терминов
+    if min_doc_freq > 1:
+        documents = filter_by_document_frequency(documents, min_doc_freq)
 
     return documents
